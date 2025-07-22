@@ -1,0 +1,18 @@
+---
+title: "Hotel booking prediction"
+format: 
+  html: 
+    toc: true
+editor: visual
+---
+
+## Loading packages
+
+First, attach the packages required for the following approaches.
+
+```{r package loading}
+#| warning: false
+library(tidymodels)  
+library(readr)       # for importing data
+library(vip)         # for variable importance plots
+```
