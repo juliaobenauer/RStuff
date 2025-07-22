@@ -149,4 +149,97 @@ autoplot(lr_auc)
 
 # 2nd model: tree-based ensemble ------------------------------------------
 
+# Build the model and improve training time
+cores <- parallel::detectCores()
+cores
 
+rf_mod <- 
+  rand_forest(mtry = tune(), min_n = tune(), trees = 1000) %>% 
+  set_engine("ranger", num.threads = cores) %>% 
+  set_mode("classification")
+
+# create recipe and workflow
+rf_recipe <- 
+  recipe(children ~ ., data = hotel_other) %>% 
+  step_date(arrival_date) %>% 
+  step_holiday(arrival_date) %>% 
+  step_rm(arrival_date) 
+
+rf_workflow <- 
+  workflow() %>% 
+  add_model(rf_mod) %>% 
+  add_recipe(rf_recipe)
+
+# train and tune model
+rf_mod
+
+extract_parameter_set_dials(rf_mod) # show what will be tuned
+
+set.seed(345)
+rf_res <- 
+  rf_workflow %>% 
+  tune_grid(val_set,
+            grid = 25,
+            control = control_grid(save_pred = TRUE),
+            metrics = metric_set(roc_auc))
+
+rf_res %>% 
+  show_best(metric = "roc_auc")
+
+autoplot(rf_res)
+
+rf_best <- 
+  rf_res %>% 
+  select_best(metric = "roc_auc") # final tuning parameters
+rf_best
+
+rf_res %>% 
+  collect_predictions()
+
+rf_auc <- 
+  rf_res %>% 
+  collect_predictions(parameters = rf_best) %>% 
+  roc_curve(children, .pred_children) %>% 
+  mutate(model = "Random Forest")
+
+
+bind_rows(rf_auc, lr_auc) %>% 
+  ggplot(aes(x = 1 - specificity, y = sensitivity, col = model)) + 
+  geom_path(lwd = 1.5, alpha = 0.8) +
+  geom_abline(lty = 3) + 
+  coord_equal() + 
+  scale_color_viridis_d(option = "plasma", end = .6)
+
+
+# Last fit ----------------------------------------------------------------
+
+# the last model
+last_rf_mod <- 
+  rand_forest(mtry = 8, min_n = 7, trees = 1000) %>% 
+  set_engine("ranger", num.threads = cores, importance = "impurity") %>% 
+  set_mode("classification")
+
+# the last workflow
+last_rf_workflow <- 
+  rf_workflow %>% 
+  update_model(last_rf_mod)
+
+# the last fit
+set.seed(345)
+last_rf_fit <- 
+  last_rf_workflow %>% 
+  last_fit(splits)
+
+last_rf_fit
+
+last_rf_fit %>% 
+  collect_metrics()
+
+last_rf_fit %>% 
+  extract_fit_parsnip() %>% 
+  vip(num_features = 20)
+
+last_rf_fit %>% 
+  collect_predictions() %>% 
+  roc_curve(children, .pred_children) %>% 
+  autoplot()
