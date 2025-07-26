@@ -54,7 +54,7 @@ hotels %>%
 
 Let's split the data into training and test data.
 
-```{r}
+```{r dataSplit}
 set.seed(123)
 splits      <- initial_split(hotels, strata = children)
 
@@ -64,7 +64,7 @@ hotel_test  <- testing(splits)
 
 These are the training test proportions of stays with children:
 
-```{r}
+```{r trainProp}
 #| output: true
 hotel_other %>% 
   count(children) %>% 
@@ -73,7 +73,7 @@ hotel_other %>%
 
 These are the test test proportions of stays with children:
 
-```{r}
+```{r testProp}
 #| output: true 
 hotel_test %>%  
   count(children) %>%    
@@ -84,7 +84,7 @@ We can see that the test proportions of stays with children are accurately refle
 
 The validation set will now be generated:
 
-```{r}
+```{r valsetgen}
 set.seed(234)
 val_set <- validation_split(hotel_other, 
                             strata = children, 
@@ -97,7 +97,7 @@ With the data prepared, it it time to apply the models.
 
 Building the model:
 
-```{r}
+```{r 1stModelBuild}
 lr_mod <- 
   logistic_reg(penalty = tune(), mixture = 1) %>% 
   set_engine("glmnet")
@@ -105,7 +105,7 @@ lr_mod <-
 
 Create the recipe:
 
-```{r}
+```{r 1stRec}
 holidays <- c("AllSouls", "AshWednesday", "ChristmasEve", "Easter", "ChristmasDay", "GoodFriday", "NewYearsDay", "PalmSunday")
 
 lr_recipe <- 
@@ -120,7 +120,7 @@ lr_recipe <-
 
 Create the workflow:
 
-```{r}
+```{r 1stWorkflow}
 lr_workflow <- 
   workflow() %>% 
   add_model(lr_mod) %>% 
@@ -129,7 +129,7 @@ lr_workflow <-
 
 Create the tuning grid:
 
-```{r}
+```{r 1stGridtuning}
 #| output: true
 lr_reg_grid <- tibble(penalty = 10^seq(-4, -1, length.out = 30))
 
@@ -139,7 +139,7 @@ lr_reg_grid %>% top_n(5)  # highest penalty values
 
 Train and tune the model:
 
-```{r}
+```{r 1stTraining}
 lr_res <- 
   lr_workflow %>% 
   tune_grid(val_set,
@@ -149,7 +149,7 @@ lr_res <-
 
 ```
 
-```{r}
+```{r 1stArearoc}
 #| output: true
 lr_plot <- 
   lr_res %>% 
@@ -163,7 +163,7 @@ lr_plot <-
 lr_plot
 ```
 
-```{r}
+```{r 1stTopModel}
 #| output: true
 top_models <-
   lr_res %>% 
@@ -172,7 +172,7 @@ top_models <-
 top_models
 ```
 
-```{r}
+```{r 1stBestModel}
 #| output: true
 lr_best <- 
   lr_res %>% 
@@ -182,7 +182,7 @@ lr_best <-
 lr_best
 ```
 
-```{r}
+```{r 1stROC}
 #| output: true
 lr_auc <- 
   lr_res %>% 
@@ -193,6 +193,155 @@ lr_auc <-
 autoplot(lr_auc)
 ```
 
-## 2nd model: penalized logistic regression
+## 2nd model: tree-based ensemble
 
-Building the model:
+Building the model and improve training time:
+
+```{r 2ndModel}
+cores <- parallel::detectCores()
+cores
+
+rf_mod <- 
+  rand_forest(mtry = tune(), min_n = tune(), trees = 1000) %>% 
+  set_engine("ranger", num.threads = cores) %>% 
+  set_mode("classification")
+```
+
+Create recipe and workflow:
+
+```{r 2ndRecWorkflow}
+rf_recipe <- 
+  recipe(children ~ ., data = hotel_other) %>% 
+  step_date(arrival_date) %>% 
+  step_holiday(arrival_date) %>% 
+  step_rm(arrival_date) 
+
+rf_workflow <- 
+  workflow() %>% 
+  add_model(rf_mod) %>% 
+  add_recipe(rf_recipe)
+```
+
+Choose hyperparameters to tune:
+
+```{r hyperParam}
+rf_mod
+
+extract_parameter_set_dials(rf_mod) # show what will be tuned
+
+```
+
+Grid tuning:
+
+```{r 2ndGridtuning}
+set.seed(345)
+rf_res <- 
+  rf_workflow %>% 
+  tune_grid(val_set,
+            grid = 25,
+            control = control_grid(save_pred = TRUE),
+            metrics = metric_set(roc_auc))
+```
+
+Show the best-fitting models and select the best-fitting one:
+
+```{r 2ndModelOverview}
+#| output: true
+rf_res %>% 
+  show_best(metric = "roc_auc")
+
+autoplot(rf_res)
+```
+
+```{r 2ndBestModel}
+#| output: true
+rf_best <- 
+  rf_res %>% 
+  select_best(metric = "roc_auc") # final tuning parameters
+rf_best
+```
+
+Calculate data to plot the ROC curve:
+
+```{r 2ndDataGen}
+rf_res %>% 
+  collect_predictions()
+
+rf_auc <- 
+  rf_res %>% 
+  collect_predictions(parameters = rf_best) %>% 
+  roc_curve(children, .pred_children) %>% 
+  mutate(model = "Random Forest")
+```
+
+Compare ROC curves of the 1st and 2nd model:
+
+```{r 2ndROC}
+#| output: true
+bind_rows(rf_auc, lr_auc) %>% 
+  ggplot(aes(x = 1 - specificity, y = sensitivity, col = model)) + 
+  geom_path(lwd = 1.5, alpha = 0.8) +
+  geom_abline(lty = 3) + 
+  coord_equal() + 
+  scale_color_viridis_d(option = "plasma", end = .6)
+```
+
+The random forest is uniformly better across event probability thresholds.
+
+## Last model fit
+
+Last model generation:
+
+```{r lastModel}
+last_rf_mod <- 
+  rand_forest(mtry = 8, min_n = 7, trees = 1000) %>% 
+  set_engine("ranger", num.threads = cores, importance = "impurity") %>% 
+  set_mode("classification")
+```
+
+Last workflow:
+
+```{r lastWorkflow}
+last_rf_workflow <- 
+  rf_workflow %>% 
+  update_model(last_rf_mod)
+```
+
+Last model fit:
+
+```{r lastFit}
+#| output: true
+set.seed(345)
+last_rf_fit <- 
+  last_rf_workflow %>% 
+  last_fit(splits)
+
+last_rf_fit
+```
+
+Collect model performance metrics:
+
+```{r lastPerfMetr}
+#| output: true
+last_rf_fit %>% 
+  collect_metrics()
+```
+
+Variable importance scores of the top 20 features:
+
+```{r vipScores}
+#| output: true
+last_rf_fit %>% 
+  extract_fit_parsnip() %>% 
+  vip(num_features = 20)
+```
+
+ROC curve of the final model fit:
+
+```{r lastROC}
+#| output: true
+last_rf_fit %>% 
+  collect_predictions() %>% 
+  roc_curve(children, .pred_children) %>% 
+  autoplot()
+```
