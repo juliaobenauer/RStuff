@@ -4,15 +4,195 @@ format:
   html: 
     toc: true
 editor: visual
+execute: 
+  warning: false 
+  output: false 
 ---
+
+This document takes the code found in this step-by-step instruction for the *tidymodels* package and formats it as Quarto document for practice purposes.
 
 ## Loading packages
 
 First, attach the packages required for the following approaches.
 
-```{r package loading}
-#| warning: false
+```{r packageLoading}
 library(tidymodels)  
 library(readr)       # for importing data
 library(vip)         # for variable importance plots
 ```
+
+## Loading and analyzing data
+
+Loading of the hotel bookings dataset.
+
+```{r dataLoading}
+
+hotels <- 
+  read_csv("https://tidymodels.org/start/case-study/hotels.csv", show_col_types = FALSE) %>%
+  mutate(across(where(is.character), as.factor))
+```
+
+Depicting the dataset dimension below.
+
+```{r dataDimensions}
+#| output: true
+dim(hotels)
+```
+
+Of interest to predict are the stays with children. Let's check how many there are in the complete dataset.
+
+```{r numberOfChildren}
+#| output: true
+hotels %>% 
+  count(children) %>% 
+  mutate(prop = n/sum(n))
+```
+
+8.1% is a rather low number and the dataset hence misbalanced. Nevertheless, we will proceed with the data as-is.
+
+## Data splitting and resampling
+
+Let's split the data into training and test data.
+
+```{r}
+set.seed(123)
+splits      <- initial_split(hotels, strata = children)
+
+hotel_other <- training(splits)
+hotel_test  <- testing(splits)
+```
+
+These are the training test proportions of stays with children:
+
+```{r}
+#| output: true
+hotel_other %>% 
+  count(children) %>% 
+  mutate(prop = n/sum(n))
+```
+
+These are the test test proportions of stays with children:
+
+```{r}
+#| output: true 
+hotel_test %>%  
+  count(children) %>%    
+  mutate(prop = n/sum(n))
+```
+
+We can see that the test proportions of stays with children are accurately reflected.
+
+The validation set will now be generated:
+
+```{r}
+set.seed(234)
+val_set <- validation_split(hotel_other, 
+                            strata = children, 
+                            prop = 0.80)
+```
+
+With the data prepared, it it time to apply the models.
+
+## 1st model: penalized logistic regression
+
+Building the model:
+
+```{r}
+lr_mod <- 
+  logistic_reg(penalty = tune(), mixture = 1) %>% 
+  set_engine("glmnet")
+```
+
+Create the recipe:
+
+```{r}
+holidays <- c("AllSouls", "AshWednesday", "ChristmasEve", "Easter", "ChristmasDay", "GoodFriday", "NewYearsDay", "PalmSunday")
+
+lr_recipe <- 
+  recipe(children ~ ., data = hotel_other) %>% 
+  step_date(arrival_date) %>% 
+  step_holiday(arrival_date, holidays = holidays) %>% 
+  step_rm(arrival_date) %>% 
+  step_dummy(all_nominal_predictors()) %>% 
+  step_zv(all_predictors()) %>% 
+  step_normalize(all_predictors())
+```
+
+Create the workflow:
+
+```{r}
+lr_workflow <- 
+  workflow() %>% 
+  add_model(lr_mod) %>% 
+  add_recipe(lr_recipe)
+```
+
+Create the tuning grid:
+
+```{r}
+#| output: true
+lr_reg_grid <- tibble(penalty = 10^seq(-4, -1, length.out = 30))
+
+lr_reg_grid %>% top_n(-5) # lowest penalty values
+lr_reg_grid %>% top_n(5)  # highest penalty values
+```
+
+Train and tune the model:
+
+```{r}
+lr_res <- 
+  lr_workflow %>% 
+  tune_grid(val_set,
+            grid = lr_reg_grid,
+            control = control_grid(save_pred = TRUE),
+            metrics = metric_set(roc_auc))
+
+```
+
+```{r}
+#| output: true
+lr_plot <- 
+  lr_res %>% 
+  collect_metrics() %>% 
+  ggplot(aes(x = penalty, y = mean)) + 
+  geom_point() + 
+  geom_line() + 
+  ylab("Area under the ROC Curve") +
+  scale_x_log10(labels = scales::label_number())
+
+lr_plot
+```
+
+```{r}
+#| output: true
+top_models <-
+  lr_res %>% 
+  show_best(metric = "roc_auc", n = 15) %>% 
+  arrange(penalty) 
+top_models
+```
+
+```{r}
+#| output: true
+lr_best <- 
+  lr_res %>% 
+  collect_metrics() %>% 
+  arrange(penalty) %>% 
+  slice(12)
+lr_best
+```
+
+```{r}
+#| output: true
+lr_auc <- 
+  lr_res %>% 
+  collect_predictions(parameters = lr_best) %>% 
+  roc_curve(children, .pred_children) %>% 
+  mutate(model = "Logistic Regression")
+
+autoplot(lr_auc)
+```
+
+## 2nd model: penalized logistic regression
+
+Building the model:
